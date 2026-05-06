@@ -1,0 +1,6 @@
+{
+  "name": "AutoClip MV",
+  "description": "Uma aplicação que edita automaticamente clipes de vídeo sincronizados com a batida de músicas enviadas pelo usuário.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
