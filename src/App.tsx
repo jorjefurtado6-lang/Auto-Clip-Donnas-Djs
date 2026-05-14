@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Play, Square, Download, Film, Music, Settings, Scissors, Video, Trash2, Camera, StopCircle, Type, Cloud, X, Loader2 } from 'lucide-react';
+import { Upload, Play, Square, Download, Film, Music, Settings, Scissors, Video, Trash2, Camera, StopCircle, Type, Cloud, X, Loader2, Image as ImageIcon } from 'lucide-react';
 
 interface VideoSource {
   id: string;
@@ -40,6 +40,7 @@ export default function App() {
   const [videoSequence, setVideoSequence] = useState<'random' | 'sequential'>('random');
 
   // Settings
+  const [videoFormat, setVideoFormat] = useState('youtube'); // youtube | shorts | square
   const [sensitivity, setSensitivity] = useState(200); // 0-255 threshold for bass
   const [cooldown, setCooldown] = useState(500); // ms minimum between cuts
   const [editingStyle, setEditingStyle] = useState('custom');
@@ -51,6 +52,10 @@ export default function App() {
   const [activeOverlayIdx, setActiveOverlayIdx] = useState(0);
 
   const [previewTime, setPreviewTime] = useState(0);
+
+  // Logo Overlay
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const logoImageRef = useRef<HTMLImageElement | null>(null);
 
   // Google Drive State
   const [googleDriveToken, setGoogleDriveToken] = useState<string | null>(null);
@@ -236,7 +241,7 @@ export default function App() {
        // Render updated overlay text on canvas if it's visible at previewTime
        requestAnimationFrame(() => drawFrame(previewTime));
      }
-  }, [overlays, isPlaying, isRecording, previewTime, videos.length]);
+  }, [overlays, isPlaying, isRecording, previewTime, videos.length, videoFormat]);
   useEffect(() => { transitionEffectRef.current = transitionEffect; }, [transitionEffect]);
   useEffect(() => { videoSequenceRef.current = videoSequence; videoQueueRef.current = []; }, [videoSequence]);
   useEffect(() => { videoQueueRef.current = []; }, [videos.length]);
@@ -282,6 +287,26 @@ export default function App() {
       if (toRemove) URL.revokeObjectURL(toRemove.url);
       return filtered;
     });
+  };
+
+  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const url = URL.createObjectURL(e.target.files[0]);
+      setLogoUrl(url);
+      const img = new Image();
+      img.onload = () => {
+        logoImageRef.current = img;
+      };
+      img.src = url;
+    }
+  };
+
+  const removeLogo = () => {
+    if (logoUrl) {
+      URL.revokeObjectURL(logoUrl);
+    }
+    setLogoUrl(null);
+    logoImageRef.current = null;
   };
 
   // Setup media elements when they are added to state
@@ -342,29 +367,14 @@ export default function App() {
       nextIndex = activeVideoIndexRef.current === 0 ? 1 : 0;
     }
     
-    // Pause current or set transition state
-    const currentVideo = videos[activeVideoIndexRef.current]?.element;
-    if (transitionEffectRef.current === 'cut') {
-      if (currentVideo) currentVideo.pause();
-    } else {
-      if (currentVideo) currentVideo.pause();
-    }
-
+    // Prepare for transition
     prevVideoIndexRef.current = activeVideoIndexRef.current;
     transitionStartTimeRef.current = performance.now();
     activeVideoIndexRef.current = nextIndex;
     
-    // Start next (ensure it plays and seek to a random position for variety)
+    // Set playback rate and play
     const nextVideo = videos[nextIndex]?.element;
     if (nextVideo) {
-       if (nextVideo.duration && isFinite(nextVideo.duration) && nextVideo.duration > 0) {
-         // keep it within safe bounds, start anywhere between 0 and 90% of the video
-         try {
-           nextVideo.currentTime = Math.random() * (nextVideo.duration * 0.9);
-         } catch (e) {
-           console.warn("Failed to set currentTime on video", e);
-         }
-       }
        nextVideo.playbackRate = videos[nextIndex].playbackRate || 1;
        nextVideo.play().catch(console.error);
     }
@@ -377,22 +387,26 @@ export default function App() {
     if (!ctx) return;
 
     if (videos.length > 0) {
-      const activeVideo = videos[activeVideoIndexRef.current]?.element;
+      let activeVideo = videos[activeVideoIndexRef.current]?.element;
       const prevVideo = prevVideoIndexRef.current !== -1 ? videos[prevVideoIndexRef.current]?.element : null;
       
       const now = performance.now();
       const tEffect = transitionEffectRef.current;
       
-      if (activeVideo && activeVideo.readyState < 2) {
+      if (activeVideo && (activeVideo.readyState < 2 || activeVideo.seeking)) {
          // Pause the transition clock while loading
          transitionStartTimeRef.current = now;
+         // Se o vídeo atual ainda não carregou, tentamos continuar renderizando o anterior para evitar tela preta
+         if (prevVideo && prevVideo.readyState >= 2 && !prevVideo.seeking) {
+             activeVideo = prevVideo;
+         }
       }
       
       const transitionDur = 600; // ms
       const elapsed = overrideTime !== undefined ? transitionDur : now - transitionStartTimeRef.current;
 
       const drawVideo = (videoElem: HTMLVideoElement | null | undefined, alpha: number = 1) => {
-        if (!videoElem || videoElem.readyState < 2) return;
+        if (!videoElem || videoElem.readyState < 2 || videoElem.seeking) return;
         const canvasAspect = canvas.width / canvas.height;
         const videoAspect = videoElem.videoWidth / videoElem.videoHeight;
         
@@ -421,7 +435,7 @@ export default function App() {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      if (tEffect !== 'cut' && elapsed < transitionDur && prevVideo) {
+      if (tEffect !== 'cut' && elapsed < transitionDur && prevVideo && prevVideo !== activeVideo) {
           const progress = elapsed / transitionDur;
           
           if (tEffect === 'fade') {
@@ -518,26 +532,54 @@ export default function App() {
 
            ctx.save();
            ctx.globalAlpha = Math.max(0, Math.min(1, opacity));
-           ctx.fillStyle = 'white';
            ctx.font = '800 64px Inter, system-ui, sans-serif';
            ctx.textAlign = 'center';
            ctx.textBaseline = 'middle';
-           ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
-           ctx.shadowBlur = 20;
            
            const x = canvas.width / 2;
            const y = canvas.height / 2 + yOffset;
 
+           const renderText = (nx: number, ny: number) => {
+             // draw shadow/outline
+             ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+             ctx.fillText(textToDraw, nx + 4, ny + 4);
+             ctx.fillText(textToDraw, nx - 4, ny - 4);
+             ctx.fillText(textToDraw, nx + 4, ny - 4);
+             ctx.fillText(textToDraw, nx - 4, ny + 4);
+             // draw main text
+             ctx.fillStyle = 'white';
+             ctx.fillText(textToDraw, nx, ny);
+           };
+
            if (scale !== 1) {
              ctx.translate(x, y);
              ctx.scale(scale, scale);
-             ctx.fillText(textToDraw, 0, 0);
+             renderText(0, 0);
            } else {
-             ctx.fillText(textToDraw, x, y);
+             renderText(x, y);
            }
            ctx.restore();
         }
       });
+    }
+
+    if (logoImageRef.current) {
+      const logo = logoImageRef.current;
+      const maxLogoWidth = canvas.width * 0.15; // 15% of canvas width
+      const scale = Math.min(maxLogoWidth / logo.width, 1);
+      const logoWidth = logo.width * scale;
+      const logoHeight = logo.height * scale;
+      
+      const marginX = canvas.width * 0.05;
+      const marginY = canvas.height * 0.05;
+      
+      const logoX = canvas.width - logoWidth - marginX;
+      const logoY = canvas.height - logoHeight - marginY;
+      
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.drawImage(logo, logoX, logoY, logoWidth, logoHeight);
+      ctx.restore();
     }
   };
 
@@ -616,8 +658,7 @@ export default function App() {
       // Stop
       setIsPlaying(false);
       audios.forEach(a => a.element?.pause());
-      const currentVideo = videos[activeVideoIndexRef.current]?.element;
-      if (currentVideo) currentVideo.pause();
+      videos.forEach(v => v.element?.pause());
     } else {
       // Start
       setupAudioConnections();
@@ -634,12 +675,20 @@ export default function App() {
         audios[0]?.element?.play().catch(console.error);
       }
       
-      const currentVideo = videos[activeVideoIndexRef.current]?.element;
-      if (currentVideo) {
-        currentVideo.muted = true; // explicitly mute videos to ensure browser allows playing
-        currentVideo.playbackRate = videos[activeVideoIndexRef.current].playbackRate || 1;
-        currentVideo.play().catch(e => console.error("Video play failed:", e));
-      }
+      videos.forEach((v, index) => {
+        if (v.element) {
+          v.element.muted = true;
+          v.element.playbackRate = v.playbackRate || 1;
+          const playPromise = v.element.play();
+          if (playPromise !== undefined) {
+             playPromise.then(() => {
+                if (index !== activeVideoIndexRef.current) {
+                   v.element?.pause();
+                }
+             }).catch(console.error);
+          }
+        }
+      });
       
       lastCutTimeRef.current = performance.now();
       transitionStartTimeRef.current = performance.now();
@@ -733,12 +782,20 @@ export default function App() {
       firstAudio.play().catch(console.error);
     }
 
-    const currentVideo = videos[activeVideoIndexRef.current]?.element;
-    if (currentVideo) {
-      currentVideo.muted = true;
-      currentVideo.playbackRate = videos[activeVideoIndexRef.current].playbackRate || 1;
-      currentVideo.play().catch(console.error);
-    }
+    videos.forEach((v, index) => {
+      if (v.element) {
+        v.element.muted = true;
+        v.element.playbackRate = v.playbackRate || 1;
+        const playPromise = v.element.play();
+        if (playPromise !== undefined) {
+           playPromise.then(() => {
+              if (index !== activeVideoIndexRef.current) {
+                 v.element?.pause();
+              }
+           }).catch(console.error);
+        }
+      }
+    });
     
     lastCutTimeRef.current = performance.now();
     transitionStartTimeRef.current = performance.now();
@@ -754,8 +811,7 @@ export default function App() {
       // Also stop playback
       setIsPlaying(false);
       audios.forEach(a => a.element?.pause());
-      const currentVideo = videos[activeVideoIndexRef.current]?.element;
-      if (currentVideo) currentVideo.pause();
+      videos.forEach(v => v.element?.pause());
     }
   };
 
@@ -767,6 +823,17 @@ export default function App() {
       setRecordedVideoUrl(url);
     }
   }, [isRecording, recordedChunks, recordedFormat]);
+
+  const getCanvasDimensions = () => {
+    switch (videoFormat) {
+      case 'shorts': return { width: 720, height: 1280 };
+      case 'square': return { width: 1080, height: 1080 };
+      case 'youtube':
+      default: return { width: 1280, height: 720 };
+    }
+  };
+
+  const canvasDims = getCanvasDimensions();
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white font-sans selection:bg-purple-500/30 relative overflow-x-hidden">
@@ -792,6 +859,8 @@ export default function App() {
                     audios[nextIndex].element?.play().catch(console.error);
                  } else {
                     setIsPlaying(false);
+                    audios.forEach(a => a.element?.pause());
+                    videos.forEach(v => v.element?.pause());
                     if (isRecording) stopRecording();
                  }
               }
@@ -808,6 +877,7 @@ export default function App() {
             muted
             loop
             playsInline
+            preload="auto"
             crossOrigin="anonymous"
           />
         ))}
@@ -960,7 +1030,23 @@ export default function App() {
               </div>
               
               <div className="mb-6 space-y-3">
-                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block">Estilo de Edição</label>
+                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block">Formato do Vídeo</label>
+                <div className="flex flex-wrap gap-2">
+                  <button 
+                    onClick={() => setVideoFormat('youtube')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${videoFormat === 'youtube' ? 'bg-purple-600/30 border-purple-500 text-purple-300' : 'bg-white/5 border-white/10 hover:bg-white/10 text-gray-300'}`}
+                  >YouTube (16:9)</button>
+                  <button 
+                    onClick={() => setVideoFormat('shorts')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${videoFormat === 'shorts' ? 'bg-purple-600/30 border-purple-500 text-purple-300' : 'bg-white/5 border-white/10 hover:bg-white/10 text-gray-300'}`}
+                  >Shorts / TikTok (9:16)</button>
+                  <button 
+                    onClick={() => setVideoFormat('square')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${videoFormat === 'square' ? 'bg-purple-600/30 border-purple-500 text-purple-300' : 'bg-white/5 border-white/10 hover:bg-white/10 text-gray-300'}`}
+                  >Quadrado (1:1)</button>
+                </div>
+
+                <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mt-4">Estilo de Edição</label>
                 <div className="flex flex-wrap gap-2">
                   <button 
                     onClick={() => handleStyleChange('cinematic')}
@@ -1168,13 +1254,41 @@ export default function App() {
                 </div>
               )}
             </section>
+
+            {/* Logo Settings */}
+            <section className="bg-white/5 backdrop-blur-lg rounded-2xl p-6 border border-white/10 shadow-xl relative z-10">
+              <div className="flex items-center gap-2 mb-4">
+                <ImageIcon className="w-5 h-5 text-indigo-400" />
+                <h2 className="text-lg font-bold">Logo do Vídeo</h2>
+              </div>
+              
+              {logoUrl ? (
+                <div className="flex items-center justify-between p-3 bg-black/50 rounded-xl border border-white/10">
+                  <img src={logoUrl} alt="Logo" className="h-10 object-contain" />
+                  <button 
+                    onClick={removeLogo}
+                    className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-400/10 rounded-md transition-colors"
+                    title="Remover logo"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : (
+                <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-dashed border-white/20 hover:border-indigo-500 rounded-xl cursor-pointer bg-black/30 hover:bg-black/50 transition-colors">
+                  <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                    <p className="text-sm text-gray-400">Inserir logo na tela (PNG, JPG)</p>
+                  </div>
+                  <input type="file" accept="image/*" onChange={handleLogoUpload} className="hidden" />
+                </label>
+              )}
+            </section>
           </div>
 
           {/* Right Column: Preview & Output */}
-          <div className="lg:col-span-8 flex flex-col gap-6">
+          <div className={`lg:col-span-8 flex flex-col gap-6 ${videoFormat === 'shorts' ? 'max-w-md mx-auto w-full lg:max-w-none lg:w-auto lg:mx-0' : ''}`}>
             
             {/* Player / Canvas Container */}
-            <div className="rounded-2xl overflow-hidden bg-black/60 backdrop-blur-xl aspect-video border border-white/10 relative flex flex-col justify-center items-center shadow-2xl z-10 group">
+            <div className={`rounded-2xl overflow-hidden bg-black/60 backdrop-blur-xl border border-white/10 relative flex flex-col justify-center items-center shadow-2xl z-10 group transition-all duration-300 ${videoFormat === 'shorts' ? 'aspect-[9/16]' : videoFormat === 'square' ? 'aspect-square max-w-xl mx-auto w-full' : 'aspect-video'}`}>
               
               {!isPlaying && !recordedVideoUrl && previewTime === 0 && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 z-10 pointer-events-none">
@@ -1196,8 +1310,8 @@ export default function App() {
               {/* Main rendering canvas */}
               <canvas 
                 ref={canvasRef} 
-                width={1280} 
-                height={720} 
+                width={canvasDims.width} 
+                height={canvasDims.height} 
                 className="w-full h-full object-contain"
               />
 
