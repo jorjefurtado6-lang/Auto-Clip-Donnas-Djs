@@ -56,6 +56,8 @@ export default function App() {
   // Logo Overlay
   const [logoUrl, setLogoUrl] = useState<string | null>(null);
   const logoImageRef = useRef<HTMLImageElement | null>(null);
+  const [logoPos, setLogoPos] = useState({ x: 0.95, y: 0.95 });
+  const [isDraggingLogo, setIsDraggingLogo] = useState(false);
 
   // Google Drive State
   const [googleDriveToken, setGoogleDriveToken] = useState<string | null>(null);
@@ -376,8 +378,19 @@ export default function App() {
     const nextVideo = videos[nextIndex]?.element;
     if (nextVideo) {
        nextVideo.playbackRate = videos[nextIndex].playbackRate || 1;
-       nextVideo.play().catch(console.error);
+       if (nextVideo.paused) {
+           nextVideo.play().catch(e => e.name !== 'AbortError' && console.error(e));
+       }
     }
+    
+    // Pause the old video safely after the transition completes
+    const oldIndex = prevVideoIndexRef.current;
+    setTimeout(() => {
+       const oldVideo = videos[oldIndex]?.element;
+       if (oldVideo && oldIndex !== activeVideoIndexRef.current) {
+           oldVideo.pause();
+       }
+    }, transitionEffectRef.current === 'cut' ? 100 : 700);
   };
 
   const drawFrame = (overrideTime?: number) => {
@@ -394,10 +407,9 @@ export default function App() {
       const tEffect = transitionEffectRef.current;
       
       if (activeVideo && (activeVideo.readyState < 2 || activeVideo.seeking)) {
-         // Pause the transition clock while loading
-         transitionStartTimeRef.current = now;
-         // Se o vídeo atual ainda não carregou, tentamos continuar renderizando o anterior para evitar tela preta
-         if (prevVideo && prevVideo.readyState >= 2 && !prevVideo.seeking) {
+         // Instead of pausing the transition clock and freezing the app, we just keep the activeVideo swapped
+         // to the previous video IF we are performing a hard cut, to prevent black flashes.
+         if (tEffect === 'cut' && prevVideo && prevVideo.readyState >= 2 && !prevVideo.seeking) {
              activeVideo = prevVideo;
          }
       }
@@ -406,7 +418,7 @@ export default function App() {
       const elapsed = overrideTime !== undefined ? transitionDur : now - transitionStartTimeRef.current;
 
       const drawVideo = (videoElem: HTMLVideoElement | null | undefined, alpha: number = 1) => {
-        if (!videoElem || videoElem.readyState < 2 || videoElem.seeking) return;
+        if (!videoElem || videoElem.readyState < 2) return;
         const canvasAspect = canvas.width / canvas.height;
         const videoAspect = videoElem.videoWidth / videoElem.videoHeight;
         
@@ -570,11 +582,8 @@ export default function App() {
       const logoWidth = logo.width * scale;
       const logoHeight = logo.height * scale;
       
-      const marginX = canvas.width * 0.05;
-      const marginY = canvas.height * 0.05;
-      
-      const logoX = canvas.width - logoWidth - marginX;
-      const logoY = canvas.height - logoHeight - marginY;
+      const logoX = logoPos.x * canvas.width - logoWidth / 2;
+      const logoY = logoPos.y * canvas.height - logoHeight / 2;
       
       ctx.save();
       ctx.globalAlpha = 0.85;
@@ -669,26 +678,19 @@ export default function App() {
 
       const activeAudio = audios[activeAudioIndexRef.current]?.element;
       if (activeAudio) {
-        activeAudio.play().catch(console.error);
+        activeAudio.play().catch(e => e.name !== 'AbortError' && console.error(e));
       } else {
         activeAudioIndexRef.current = 0;
-        audios[0]?.element?.play().catch(console.error);
+        audios[0]?.element?.play().catch(e => e.name !== 'AbortError' && console.error(e));
       }
       
-      videos.forEach((v, index) => {
-        if (v.element) {
-          v.element.muted = true;
-          v.element.playbackRate = v.playbackRate || 1;
-          const playPromise = v.element.play();
-          if (playPromise !== undefined) {
-             playPromise.then(() => {
-                if (index !== activeVideoIndexRef.current) {
-                   v.element?.pause();
-                }
-             }).catch(console.error);
-          }
-        }
-      });
+      const firstActiveVideo = videos[activeVideoIndexRef.current]?.element || videos[0]?.element;
+      if (firstActiveVideo) {
+         firstActiveVideo.currentTime = 0;
+         firstActiveVideo.muted = true;
+         firstActiveVideo.playbackRate = videos[activeVideoIndexRef.current]?.playbackRate || 1;
+         firstActiveVideo.play().catch(e => e.name !== 'AbortError' && console.error(e));
+      }
       
       lastCutTimeRef.current = performance.now();
       transitionStartTimeRef.current = performance.now();
@@ -751,12 +753,18 @@ export default function App() {
     
     setRecordedFormat(actualFormat);
     
+    let recorderOptions: MediaRecorderOptions = { mimeType: finalMimeType, videoBitsPerSecond: 2500000 };
     try {
-      const options = { mimeType: finalMimeType };
-      mediaRecorderRef.current = new MediaRecorder(combinedStream, options);
+      mediaRecorderRef.current = new MediaRecorder(combinedStream, recorderOptions);
     } catch (e) {
       console.warn('Preferred codec not supported, falling back to default');
-      mediaRecorderRef.current = new MediaRecorder(combinedStream, { mimeType: `video/${actualFormat}` });
+      try {
+        recorderOptions = { mimeType: `video/${actualFormat}`, videoBitsPerSecond: 2500000 };
+        mediaRecorderRef.current = new MediaRecorder(combinedStream, recorderOptions);
+      } catch (e2) {
+        console.warn('Fallback explicitly typed codec failed, using no params');
+        mediaRecorderRef.current = new MediaRecorder(combinedStream);
+      }
     }
 
     mediaRecorderRef.current.ondataavailable = (e) => {
@@ -779,23 +787,16 @@ export default function App() {
     activeAudioIndexRef.current = 0;
     const firstAudio = audios[0]?.element;
     if (firstAudio) {
-      firstAudio.play().catch(console.error);
+      firstAudio.play().catch(e => e.name !== 'AbortError' && console.error(e));
     }
 
-    videos.forEach((v, index) => {
-      if (v.element) {
-        v.element.muted = true;
-        v.element.playbackRate = v.playbackRate || 1;
-        const playPromise = v.element.play();
-        if (playPromise !== undefined) {
-           playPromise.then(() => {
-              if (index !== activeVideoIndexRef.current) {
-                 v.element?.pause();
-              }
-           }).catch(console.error);
-        }
-      }
-    });
+    const firstActiveVideo = videos[activeVideoIndexRef.current]?.element || videos[0]?.element;
+    if (firstActiveVideo) {
+      firstActiveVideo.currentTime = 0;
+      firstActiveVideo.muted = true;
+      firstActiveVideo.playbackRate = videos[activeVideoIndexRef.current]?.playbackRate || 1;
+      firstActiveVideo.play().catch(e => e.name !== 'AbortError' && console.error(e));
+    }
     
     lastCutTimeRef.current = performance.now();
     transitionStartTimeRef.current = performance.now();
@@ -835,6 +836,98 @@ export default function App() {
 
   const canvasDims = getCanvasDimensions();
 
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!logoImageRef.current || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    
+    const canvasAspect = canvas.width / canvas.height;
+    const rectAspect = rect.width / rect.height;
+    
+    let drawWidth = rect.width;
+    let drawHeight = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+    
+    if (rectAspect > canvasAspect) {
+      drawWidth = rect.height * canvasAspect;
+      offsetX = (rect.width - drawWidth) / 2;
+    } else {
+      drawHeight = rect.width / canvasAspect;
+      offsetY = (rect.height - drawHeight) / 2;
+    }
+
+    const mouseX = e.clientX - rect.left - offsetX;
+    const mouseY = e.clientY - rect.top - offsetY;
+
+    if (mouseX < 0 || mouseX > drawWidth || mouseY < 0 || mouseY > drawHeight) return;
+
+    const canvasX = (mouseX / drawWidth) * canvas.width;
+    const canvasY = (mouseY / drawHeight) * canvas.height;
+
+    const logo = logoImageRef.current;
+    const maxLogoWidth = canvas.width * 0.15;
+    const scale = Math.min(maxLogoWidth / logo.width, 1);
+    const logoWidth = logo.width * scale;
+    const logoHeight = logo.height * scale;
+    
+    const logoLeft = logoPos.x * canvas.width - logoWidth / 2;
+    const logoTop = logoPos.y * canvas.height - logoHeight / 2;
+    const logoRight = logoLeft + logoWidth;
+    const logoBottom = logoTop + logoHeight;
+
+    if (canvasX >= logoLeft - 20 && canvasX <= logoRight + 20 && canvasY >= logoTop - 20 && canvasY <= logoBottom + 20) {
+       setIsDraggingLogo(true);
+       e.currentTarget.setPointerCapture(e.pointerId);
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+     if (!isDraggingLogo || !canvasRef.current || !logoImageRef.current) return;
+     const canvas = canvasRef.current;
+     const rect = canvas.getBoundingClientRect();
+     
+     const canvasAspect = canvas.width / canvas.height;
+     const rectAspect = rect.width / rect.height;
+     let drawWidth = rect.width;
+     let drawHeight = rect.height;
+     let offsetX = 0;
+     let offsetY = 0;
+     
+     if (rectAspect > canvasAspect) {
+       drawWidth = rect.height * canvasAspect;
+       offsetX = (rect.width - drawWidth) / 2;
+     } else {
+       drawHeight = rect.width / canvasAspect;
+       offsetY = (rect.height - drawHeight) / 2;
+     }
+
+     const mouseX = e.clientX - rect.left - offsetX;
+     const mouseY = e.clientY - rect.top - offsetY;
+
+     const canvasX = (mouseX / drawWidth) * canvas.width;
+     const canvasY = (mouseY / drawHeight) * canvas.height;
+
+     let normX = canvasX / canvas.width;
+     let normY = canvasY / canvas.height;
+
+     normX = Math.max(0, Math.min(1, normX));
+     normY = Math.max(0, Math.min(1, normY));
+
+     setLogoPos({ x: normX, y: normY });
+     
+     if (!isPlaying && !isRecording && videos.length > 0) {
+        requestAnimationFrame(() => drawFrame(previewTime));
+     }
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    setIsDraggingLogo(false);
+    try {
+       e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch (err) {}
+  };
+
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white font-sans selection:bg-purple-500/30 relative overflow-x-hidden">
       
@@ -843,7 +936,7 @@ export default function App() {
       <div className="absolute bottom-[-10%] right-[-10%] w-[50%] h-[50%] bg-blue-900/20 rounded-full blur-[120px] pointer-events-none"></div>
       
       {/* Hidden elements for processing */}
-      <div className="hidden">
+      <div className="absolute top-0 left-0 w-10 h-10 pointer-events-none -z-50 overflow-hidden opacity-[0.01]">
         {audios.map((a, index) => (
           <audio
             key={a.id}
@@ -856,7 +949,7 @@ export default function App() {
                  const nextIndex = index + 1;
                  if (nextIndex < audios.length) {
                     activeAudioIndexRef.current = nextIndex;
-                    audios[nextIndex].element?.play().catch(console.error);
+                    audios[nextIndex].element?.play().catch(e => e.name !== 'AbortError' && console.error(e));
                  } else {
                     setIsPlaying(false);
                     audios.forEach(a => a.element?.pause());
@@ -868,7 +961,7 @@ export default function App() {
           />
         ))}
       </div>
-      <div className="hidden">
+      <div className="absolute top-0 left-0 w-10 h-10 pointer-events-none -z-50 overflow-hidden opacity-[0.01]">
         {videos.map((v) => (
           <video
             key={v.id}
@@ -1312,7 +1405,11 @@ export default function App() {
                 ref={canvasRef} 
                 width={canvasDims.width} 
                 height={canvasDims.height} 
-                className="w-full h-full object-contain"
+                className={`w-full h-full object-contain ${logoUrl ? (isDraggingLogo ? 'cursor-grabbing' : 'cursor-grab') : ''}`}
+                onPointerDown={handlePointerDown}
+                onPointerMove={handlePointerMove}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerUp}
               />
 
               {/* Timeline Preview Slider when NOT playing */}
